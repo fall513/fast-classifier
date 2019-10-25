@@ -56,6 +56,7 @@ Simple connection manager for the Shortcut forwarding engine.
 endef
 
 # EXTRA_CFLAGS+=-DSFE_SUPPORT_IPV6
+# EXTRA_CFLAGS+=-DSFE_SUPPORT_CM
 
 define Build/Prepare
 	rm -rf $(PKG_BUILD_DIR)
