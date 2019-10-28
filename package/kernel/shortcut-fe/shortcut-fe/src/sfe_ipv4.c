@@ -22,6 +22,7 @@
 #include <net/tcp.h>
 #include <linux/etherdevice.h>
 #include <net/checksum.h>
+#include <linux/version.h>
 
 #include "sfe.h"
 #include "sfe_cm.h"
@@ -2719,9 +2720,17 @@ another_round:
 /*
  * sfe_ipv4_periodic_sync()
  */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+static void sfe_ipv4_periodic_sync(struct timer_list *t)
+#else
 static void sfe_ipv4_periodic_sync(unsigned long arg)
+#endif
 {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+	struct sfe_ipv4 *si = from_timer(si, t, timer);
+#else
 	struct sfe_ipv4 *si = (struct sfe_ipv4 *)arg;
+#endif
 	u64 now_jiffies;
 	int quota;
 	sfe_sync_rule_callback_t sync_rule_callback;
@@ -3312,7 +3321,11 @@ static int __init sfe_ipv4_init(void)
 	/*
 	 * Create a timer to handle periodic statistics.
 	 */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+	timer_setup(&si->timer, sfe_ipv4_periodic_sync, 0);
+#else
 	setup_timer(&si->timer, sfe_ipv4_periodic_sync, (unsigned long)si);
+#endif
 	mod_timer(&si->timer, jiffies + ((HZ + 99) / 100));
 
 	spin_lock_init(&si->lock);
