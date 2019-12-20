@@ -1,3 +1,49 @@
+diff --git a/drivers/net/ppp/ppp_generic.c b/drivers/net/ppp/ppp_generic.c
+index 794a473..fb9d69f 100644
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -1099,7 +1099,7 @@ static void ppp_setup(struct net_device *dev)
+ 	dev->hard_header_len = PPP_HDRLEN;
+ 	dev->mtu = PPP_MRU;
+ 	dev->addr_len = 0;
+-	dev->tx_queue_len = 3;
++	dev->tx_queue_len = 0;
+ 	dev->type = ARPHRD_PPP;
+ 	dev->flags = IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
+ 	dev->features |= NETIF_F_NETNS_LOCAL;
+diff --git a/drivers/net/ppp/pppoe.c b/drivers/net/ppp/pppoe.c
+index 7211be3..9c2b1cd 100644
+--- a/drivers/net/ppp/pppoe.c
++++ b/drivers/net/ppp/pppoe.c
+@@ -527,6 +527,10 @@ static struct proto pppoe_sk_proto __read_mostly = {
+ 	.obj_size = sizeof(struct pppox_sock),
+ };
+ 
++#ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
++extern int (*insert_pppox_sock)(struct pppox_sock *sk, struct sk_buff *skb);
++#endif
++
+ /***********************************************************************
+  *
+  * Initialize a new struct sock.
+@@ -912,6 +916,17 @@ static int __pppoe_xmit(struct sock *sk, struct sk_buff *skb)
+ 	struct pppoe_hdr *ph;
+ 	int data_len = skb->len;
+ 
++#ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
++	int (*fast_nat_insert)(struct pppox_sock *sk, struct sk_buff *skb);
++
++	if (skb->fast_forwarded) {
++		fast_nat_insert = rcu_dereference(insert_pppox_sock);
++		if (fast_nat_insert) {
++			fast_nat_insert(po, skb);
++		}
++	}
++#endif
++
+ 	/* The higher-level PPP code (ppp_unregister_channel()) ensures the PPP
+ 	 * xmit operations conclude prior to an unregistration call.  Thus
+ 	 * sk->sk_state cannot change, so we don't need to do lock_sock().
 diff --git a/include/linux/if_bridge.h b/include/linux/if_bridge.h
 index 808dcb8..fdd903b 100644
 --- a/include/linux/if_bridge.h
@@ -16,12 +62,14 @@ diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
 index 936e452..9575f1a 100644
 --- a/include/linux/skbuff.h
 +++ b/include/linux/skbuff.h
-@@ -597,6 +597,9 @@ struct sk_buff {
+@@ -597,6 +597,11 @@ struct sk_buff {
  #endif
  	__u8			ipvs_property:1;
  	__u8			inner_protocol_type:1;
 +#ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
 +	__u8			fast_forwarded:1;
++	__u8			ignore_pppoe_accelerate:1;
++	__be32			origin_srcip;
 +#endif
  	__u8			gro_skip:1;
  	/* 3 or 5 bit hole */
@@ -162,10 +210,10 @@ index ed307db..a0d1b48 100644
 +#endif
 \ No newline at end of file
 diff --git a/net/core/dev.c b/net/core/dev.c
-index 477a3ea..a865439 100644
+index 477a3ea..15c9d83 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
-@@ -2620,8 +2620,19 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
+@@ -2620,8 +2620,20 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
  	unsigned int len;
  	int rc;
  
@@ -175,8 +223,9 @@ index 477a3ea..a865439 100644
 +	 * go to any taps (by definition we're trying to bypass them).
 +	 */
 +	if (unlikely(!skb->fast_forwarded)) {
-+		if (!list_empty(&ptype_all))
++		if (!list_empty(&ptype_all)) {
 +			dev_queue_xmit_nit(skb, dev);
++		}
 +	}
 +#else
  	if (!list_empty(&ptype_all))
@@ -185,19 +234,21 @@ index 477a3ea..a865439 100644
  
  #ifdef CONFIG_ETHERNET_PACKET_MANGLE
  	if (!dev->eth_mangle_tx ||
-@@ -3609,6 +3620,11 @@ void netdev_rx_handler_unregister(struct net_device *dev)
+@@ -3609,6 +3621,13 @@ void netdev_rx_handler_unregister(struct net_device *dev)
  }
  EXPORT_SYMBOL_GPL(netdev_rx_handler_unregister);
  
 +#ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
 +int (*fast_nat_recv)(struct sk_buff *skb) __rcu __read_mostly;
 +EXPORT_SYMBOL_GPL(fast_nat_recv);
++int (*insert_pppox_sock)(struct pppox_sock *sk, struct sk_buff *skb) __rcu __read_mostly;
++EXPORT_SYMBOL_GPL(insert_pppox_sock);
 +#endif
 +
  /*
   * Limit the use of PFMEMALLOC reserves to those protocols that implement
   * the special handling of PFMEMALLOC skbs.
-@@ -3636,6 +3652,9 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
+@@ -3636,6 +3655,9 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
  	bool deliver_exact = false;
  	int ret = NET_RX_DROP;
  	__be16 type;
@@ -207,7 +258,7 @@ index 477a3ea..a865439 100644
  
  	net_timestamp_check(!netdev_tstamp_prequeue, skb);
  
-@@ -3664,6 +3683,16 @@ another_round:
+@@ -3704,6 +3726,16 @@ ncls:
  			goto unlock;
  	}
  
@@ -221,9 +272,20 @@ index 477a3ea..a865439 100644
 +	}
 +#endif
 +
- #ifdef CONFIG_NET_CLS_ACT
- 	if (skb->tc_verd & TC_NCLS) {
- 		skb->tc_verd = CLR_TC_NCLS(skb->tc_verd);
+ 	rx_handler = rcu_dereference(skb->dev->rx_handler);
+ 	if (rx_handler) {
+ 		if (pt_prev) {
+@@ -6275,8 +6307,8 @@ int register_netdevice(struct net_device *dev)
+ 	/* Transfer changeable features to wanted_features and enable
+ 	 * software offloads (GSO and GRO).
+ 	 */
+-	dev->hw_features |= NETIF_F_SOFT_FEATURES;
+-	dev->features |= NETIF_F_SOFT_FEATURES;
++//	dev->hw_features |= NETIF_F_SOFT_FEATURES;
++//	dev->features |= NETIF_F_SOFT_FEATURES;
+ 	dev->wanted_features = dev->features & dev->hw_features;
+ 
+ 	if (!(dev->flags & IFF_LOOPBACK)) {
 diff --git a/net/netfilter/Kconfig b/net/netfilter/Kconfig
 index 3b6c5e4..5cad609 100644
 --- a/net/netfilter/Kconfig

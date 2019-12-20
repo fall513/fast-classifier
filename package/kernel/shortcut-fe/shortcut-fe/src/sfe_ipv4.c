@@ -23,137 +23,60 @@
 #include <linux/etherdevice.h>
 #include <net/checksum.h>
 #include <linux/version.h>
+// for pppoe
+#include <linux/if_pppox.h>
+// for vlan
+#include <linux/if_vlan.h>
 
 #include "sfe.h"
 #include "sfe_cm.h"
 
-/*
- * By default Linux IP header and transport layer header structures are
- * unpacked, assuming that such headers should be 32-bit aligned.
- * Unfortunately some wireless adaptors can't cope with this requirement and
- * some CPUs can't handle misaligned accesses.  For those platforms we
- * define SFE_IPV4_UNALIGNED_IP_HEADER and mark the structures as packed.
- * When we do this the compiler will generate slightly worse code than for the
- * aligned case (on most platforms) but will be much quicker than fixing
- * things up in an unaligned trap handler.
- */
-#define SFE_IPV4_UNALIGNED_IP_HEADER 1
-#if SFE_IPV4_UNALIGNED_IP_HEADER
-#define SFE_IPV4_UNALIGNED_STRUCT __attribute__((packed, aligned(2)))
-#else
-#define SFE_IPV4_UNALIGNED_STRUCT
+#if ENABLE_PPPOE_RULE
+#include <linux/if_pppox.h>
+#include <linux/ppp_defs.h>
 #endif
 
-/*
- * An Ethernet header, but with an optional "packed" attribute to
- * help with performance on some platforms (see the definition of
- * SFE_IPV4_UNALIGNED_STRUCT)
- */
-struct sfe_ipv4_eth_hdr {
-	__be16 h_dest[ETH_ALEN / 2];
-	__be16 h_source[ETH_ALEN / 2];
-	__be16 h_proto;
-} SFE_IPV4_UNALIGNED_STRUCT;
+#define MAX_PPPOE_INTERFACE	8
 
-#define SFE_IPV4_DSCP_MASK 0x3
-#define SFE_IPV4_DSCP_SHIFT 2
+struct net_device *default_pppoe_dev[MAX_PPPOE_INTERFACE] = {NULL};
 
-/*
- * An IPv4 header, but with an optional "packed" attribute to
- * help with performance on some platforms (see the definition of
- * SFE_IPV4_UNALIGNED_STRUCT)
- */
-struct sfe_ipv4_ip_hdr {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	__u8 ihl:4,
-	     version:4;
-#elif defined (__BIG_ENDIAN_BITFIELD)
-	__u8 version:4,
-	     ihl:4;
-#else
-#error	"Please fix <asm/byteorder.h>"
-#endif
-	__u8 tos;
-	__be16 tot_len;
-	__be16 id;
-	__be16 frag_off;
-	__u8 ttl;
-	__u8 protocol;
-	__sum16 check;
-	__be32 saddr;
-	__be32 daddr;
+static int update_pppoe_interface(struct net_device *dev)
+{
+	int i = 0;
 
-	/*
-	 * The options start here.
-	 */
-} SFE_IPV4_UNALIGNED_STRUCT;
+	// try to find same dev
+	for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+		if (default_pppoe_dev[i] &&
+		  default_pppoe_dev[i] == dev) {
+			return 0;
+		}
+	}
 
-/*
- * A UDP header, but with an optional "packed" attribute to
- * help with performance on some platforms (see the definition of
- * SFE_IPV4_UNALIGNED_STRUCT)
- */
-struct sfe_ipv4_udp_hdr {
-	__be16 source;
-	__be16 dest;
-	__be16 len;
-	__sum16 check;
-} SFE_IPV4_UNALIGNED_STRUCT;
+	// no same dev, so insert a pppoe dev
+	for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+		if (!default_pppoe_dev[i]) {
+			default_pppoe_dev[i] = dev;
+			return 1;
+		}
+	}
 
-/*
- * A TCP header, but with an optional "packed" attribute to
- * help with performance on some platforms (see the definition of
- * SFE_IPV4_UNALIGNED_STRUCT)
- */
-struct sfe_ipv4_tcp_hdr {
-	__be16 source;
-	__be16 dest;
-	__be32 seq;
-	__be32 ack_seq;
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	__u16 res1:4,
-	      doff:4,
-	      fin:1,
-	      syn:1,
-	      rst:1,
-	      psh:1,
-	      ack:1,
-	      urg:1,
-	      ece:1,
-	      cwr:1;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-	__u16 doff:4,
-	      res1:4,
-	      cwr:1,
-	      ece:1,
-	      urg:1,
-	      ack:1,
-	      psh:1,
-	      rst:1,
-	      syn:1,
-	      fin:1;
-#else
-#error	"Adjust your <asm/byteorder.h> defines"
-#endif
-	__be16 window;
-	__sum16	check;
-	__be16 urg_ptr;
-} SFE_IPV4_UNALIGNED_STRUCT;
+	// no empty space to save pppoe dev
+	return -1;
+}
 
-/*
- * Specifies the lower bound on ACK numbers carried in the TCP header
- */
-#define SFE_IPV4_TCP_MAX_ACK_WINDOW 65520
+static int remove_all_pppoe_interface(void)
+{
+	int i = 0;
 
-/*
- * IPv4 TCP connection match additional data.
- */
-struct sfe_ipv4_tcp_connection_match {
-	u8 win_scale;		/* Window scale */
-	u32 max_win;		/* Maximum window size seen */
-	u32 end;			/* Sequence number of the next byte to send (seq + segment length) */
-	u32 max_end;		/* Sequence number of the last byte to ack */
-};
+	// try to find same dev
+	for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+		if (default_pppoe_dev[i]) {
+			default_pppoe_dev[i] = NULL;
+		}
+	}
+
+	return 0;
+}
 
 /*
  * Bit flags for IPv4 connection matching entry.
@@ -172,312 +95,6 @@ struct sfe_ipv4_tcp_connection_match {
 					/* remark priority of SKB */
 #define SFE_IPV4_CONNECTION_MATCH_FLAG_DSCP_REMARK (1<<6)
 					/* remark DSCP of packet */
-
-/*
- * IPv4 connection matching structure.
- */
-struct sfe_ipv4_connection_match {
-	/*
-	 * References to other objects.
-	 */
-	struct sfe_ipv4_connection_match *next;
-	struct sfe_ipv4_connection_match *prev;
-	struct sfe_ipv4_connection *connection;
-	struct sfe_ipv4_connection_match *counter_match;
-					/* Matches the flow in the opposite direction as the one in *connection */
-	struct sfe_ipv4_connection_match *active_next;
-	struct sfe_ipv4_connection_match *active_prev;
-	bool active;			/* Flag to indicate if we're on the active list */
-
-	/*
-	 * Characteristics that identify flows that match this rule.
-	 */
-	struct net_device *match_dev;	/* Network device */
-	u8 match_protocol;		/* Protocol */
-	__be32 match_src_ip;		/* Source IP address */
-	__be32 match_dest_ip;		/* Destination IP address */
-	__be16 match_src_port;		/* Source port/connection ident */
-	__be16 match_dest_port;		/* Destination port/connection ident */
-
-	/*
-	 * Control the operations of the match.
-	 */
-	u32 flags;			/* Bit flags */
-#ifdef CONFIG_XFRM
-	u32 flow_accel;             /* The flow accelerated or not */
-#endif
-
-	/*
-	 * Connection state that we track once we match.
-	 */
-	union {				/* Protocol-specific state */
-		struct sfe_ipv4_tcp_connection_match tcp;
-	} protocol_state;
-	/*
-	 * Stats recorded in a sync period. These stats will be added to
-	 * rx_packet_count64/rx_byte_count64 after a sync period.
-	 */
-	u32 rx_packet_count;
-	u32 rx_byte_count;
-
-	/*
-	 * Packet translation information.
-	 */
-	__be32 xlate_src_ip;		/* Address after source translation */
-	__be16 xlate_src_port;	/* Port/connection ident after source translation */
-	u16 xlate_src_csum_adjustment;
-					/* Transport layer checksum adjustment after source translation */
-	u16 xlate_src_partial_csum_adjustment;
-					/* Transport layer pseudo header checksum adjustment after source translation */
-
-	__be32 xlate_dest_ip;		/* Address after destination translation */
-	__be16 xlate_dest_port;	/* Port/connection ident after destination translation */
-	u16 xlate_dest_csum_adjustment;
-					/* Transport layer checksum adjustment after destination translation */
-	u16 xlate_dest_partial_csum_adjustment;
-					/* Transport layer pseudo header checksum adjustment after destination translation */
-
-	/*
-	 * QoS information
-	 */
-	u32 priority;
-	u32 dscp;
-
-	/*
-	 * Packet transmit information.
-	 */
-	struct net_device *xmit_dev;	/* Network device on which to transmit */
-	unsigned short int xmit_dev_mtu;
-					/* Interface MTU */
-	u16 xmit_dest_mac[ETH_ALEN / 2];
-					/* Destination MAC address to use when forwarding */
-	u16 xmit_src_mac[ETH_ALEN / 2];
-					/* Source MAC address to use when forwarding */
-
-	/*
-	 * Summary stats.
-	 */
-	u64 rx_packet_count64;
-	u64 rx_byte_count64;
-};
-
-/*
- * Per-connection data structure.
- */
-struct sfe_ipv4_connection {
-	struct sfe_ipv4_connection *next;
-					/* Pointer to the next entry in a hash chain */
-	struct sfe_ipv4_connection *prev;
-					/* Pointer to the previous entry in a hash chain */
-	int protocol;			/* IP protocol number */
-	__be32 src_ip;			/* Src IP addr pre-translation */
-	__be32 src_ip_xlate;		/* Src IP addr post-translation */
-	__be32 dest_ip;			/* Dest IP addr pre-translation */
-	__be32 dest_ip_xlate;		/* Dest IP addr post-translation */
-	__be16 src_port;		/* Src port pre-translation */
-	__be16 src_port_xlate;		/* Src port post-translation */
-	__be16 dest_port;		/* Dest port pre-translation */
-	__be16 dest_port_xlate;		/* Dest port post-translation */
-	struct sfe_ipv4_connection_match *original_match;
-					/* Original direction matching structure */
-	struct net_device *original_dev;
-					/* Original direction source device */
-	struct sfe_ipv4_connection_match *reply_match;
-					/* Reply direction matching structure */
-	struct net_device *reply_dev;	/* Reply direction source device */
-	u64 last_sync_jiffies;		/* Jiffies count for the last sync */
-	struct sfe_ipv4_connection *all_connections_next;
-					/* Pointer to the next entry in the list of all connections */
-	struct sfe_ipv4_connection *all_connections_prev;
-					/* Pointer to the previous entry in the list of all connections */
-	u32 mark;			/* mark for outgoing packet */
-	u32 debug_read_seq;		/* sequence number for debug dump */
-};
-
-/*
- * IPv4 connections and hash table size information.
- */
-#define SFE_IPV4_CONNECTION_HASH_SHIFT 12
-#define SFE_IPV4_CONNECTION_HASH_SIZE (1 << SFE_IPV4_CONNECTION_HASH_SHIFT)
-#define SFE_IPV4_CONNECTION_HASH_MASK (SFE_IPV4_CONNECTION_HASH_SIZE - 1)
-
-enum sfe_ipv4_exception_events {
-	SFE_IPV4_EXCEPTION_EVENT_UDP_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_UDP_NO_CONNECTION,
-	SFE_IPV4_EXCEPTION_EVENT_UDP_IP_OPTIONS_OR_INITIAL_FRAGMENT,
-	SFE_IPV4_EXCEPTION_EVENT_UDP_SMALL_TTL,
-	SFE_IPV4_EXCEPTION_EVENT_UDP_NEEDS_FRAGMENTATION,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_NO_CONNECTION_SLOW_FLAGS,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_NO_CONNECTION_FAST_FLAGS,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_IP_OPTIONS_OR_INITIAL_FRAGMENT,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_SMALL_TTL,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_NEEDS_FRAGMENTATION,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_FLAGS,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_SEQ_EXCEEDS_RIGHT_EDGE,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_SMALL_DATA_OFFS,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_BAD_SACK,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_BIG_DATA_OFFS,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_SEQ_BEFORE_LEFT_EDGE,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_ACK_EXCEEDS_RIGHT_EDGE,
-	SFE_IPV4_EXCEPTION_EVENT_TCP_ACK_BEFORE_LEFT_EDGE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_UNHANDLED_TYPE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_NON_V4,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_IP_OPTIONS_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_UDP_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_TCP_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_IPV4_UNHANDLED_PROTOCOL,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_NO_CONNECTION,
-	SFE_IPV4_EXCEPTION_EVENT_ICMP_FLUSHED_CONNECTION,
-	SFE_IPV4_EXCEPTION_EVENT_HEADER_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_BAD_TOTAL_LENGTH,
-	SFE_IPV4_EXCEPTION_EVENT_NON_V4,
-	SFE_IPV4_EXCEPTION_EVENT_NON_INITIAL_FRAGMENT,
-	SFE_IPV4_EXCEPTION_EVENT_DATAGRAM_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_IP_OPTIONS_INCOMPLETE,
-	SFE_IPV4_EXCEPTION_EVENT_UNHANDLED_PROTOCOL,
-	SFE_IPV4_EXCEPTION_EVENT_CSUM_ERROR,
-	SFE_IPV4_EXCEPTION_EVENT_LAST
-};
-
-static char *sfe_ipv4_exception_events_string[SFE_IPV4_EXCEPTION_EVENT_LAST] = {
-	"UDP_HEADER_INCOMPLETE",
-	"UDP_NO_CONNECTION",
-	"UDP_IP_OPTIONS_OR_INITIAL_FRAGMENT",
-	"UDP_SMALL_TTL",
-	"UDP_NEEDS_FRAGMENTATION",
-	"TCP_HEADER_INCOMPLETE",
-	"TCP_NO_CONNECTION_SLOW_FLAGS",
-	"TCP_NO_CONNECTION_FAST_FLAGS",
-	"TCP_IP_OPTIONS_OR_INITIAL_FRAGMENT",
-	"TCP_SMALL_TTL",
-	"TCP_NEEDS_FRAGMENTATION",
-	"TCP_FLAGS",
-	"TCP_SEQ_EXCEEDS_RIGHT_EDGE",
-	"TCP_SMALL_DATA_OFFS",
-	"TCP_BAD_SACK",
-	"TCP_BIG_DATA_OFFS",
-	"TCP_SEQ_BEFORE_LEFT_EDGE",
-	"TCP_ACK_EXCEEDS_RIGHT_EDGE",
-	"TCP_ACK_BEFORE_LEFT_EDGE",
-	"ICMP_HEADER_INCOMPLETE",
-	"ICMP_UNHANDLED_TYPE",
-	"ICMP_IPV4_HEADER_INCOMPLETE",
-	"ICMP_IPV4_NON_V4",
-	"ICMP_IPV4_IP_OPTIONS_INCOMPLETE",
-	"ICMP_IPV4_UDP_HEADER_INCOMPLETE",
-	"ICMP_IPV4_TCP_HEADER_INCOMPLETE",
-	"ICMP_IPV4_UNHANDLED_PROTOCOL",
-	"ICMP_NO_CONNECTION",
-	"ICMP_FLUSHED_CONNECTION",
-	"HEADER_INCOMPLETE",
-	"BAD_TOTAL_LENGTH",
-	"NON_V4",
-	"NON_INITIAL_FRAGMENT",
-	"DATAGRAM_INCOMPLETE",
-	"IP_OPTIONS_INCOMPLETE",
-	"UNHANDLED_PROTOCOL",
-	"CSUM_ERROR"
-};
-
-/*
- * Per-module structure.
- */
-struct sfe_ipv4 {
-	spinlock_t lock;		/* Lock for SMP correctness */
-	struct sfe_ipv4_connection_match *active_head;
-					/* Head of the list of recently active connections */
-	struct sfe_ipv4_connection_match *active_tail;
-					/* Tail of the list of recently active connections */
-	struct sfe_ipv4_connection *all_connections_head;
-					/* Head of the list of all connections */
-	struct sfe_ipv4_connection *all_connections_tail;
-					/* Tail of the list of all connections */
-	unsigned int num_connections;	/* Number of connections */
-	struct timer_list timer;	/* Timer used for periodic sync ops */
-	sfe_sync_rule_callback_t __rcu sync_rule_callback;
-					/* Callback function registered by a connection manager for stats syncing */
-	struct sfe_ipv4_connection *conn_hash[SFE_IPV4_CONNECTION_HASH_SIZE];
-					/* Connection hash table */
-	struct sfe_ipv4_connection_match *conn_match_hash[SFE_IPV4_CONNECTION_HASH_SIZE];
-					/* Connection match hash table */
-
-	/*
-	 * Stats recorded in a sync period. These stats will be added to
-	 * connection_xxx64 after a sync period.
-	 */
-	u32 connection_create_requests;
-					/* Number of IPv4 connection create requests */
-	u32 connection_create_collisions;
-					/* Number of IPv4 connection create requests that collided with existing hash table entries */
-	u32 connection_destroy_requests;
-					/* Number of IPv4 connection destroy requests */
-	u32 connection_destroy_misses;
-					/* Number of IPv4 connection destroy requests that missed our hash table */
-	u32 connection_match_hash_hits;
-					/* Number of IPv4 connection match hash hits */
-	u32 connection_match_hash_reorders;
-					/* Number of IPv4 connection match hash reorders */
-	u32 connection_flushes;		/* Number of IPv4 connection flushes */
-	u32 packets_forwarded;		/* Number of IPv4 packets forwarded */
-	u32 packets_not_forwarded;	/* Number of IPv4 packets not forwarded */
-	u32 exception_events[SFE_IPV4_EXCEPTION_EVENT_LAST];
-
-	/*
-	 * Summary statistics.
-	 */
-	u64 connection_create_requests64;
-					/* Number of IPv4 connection create requests */
-	u64 connection_create_collisions64;
-					/* Number of IPv4 connection create requests that collided with existing hash table entries */
-	u64 connection_destroy_requests64;
-					/* Number of IPv4 connection destroy requests */
-	u64 connection_destroy_misses64;
-					/* Number of IPv4 connection destroy requests that missed our hash table */
-	u64 connection_match_hash_hits64;
-					/* Number of IPv4 connection match hash hits */
-	u64 connection_match_hash_reorders64;
-					/* Number of IPv4 connection match hash reorders */
-	u64 connection_flushes64;	/* Number of IPv4 connection flushes */
-	u64 packets_forwarded64;	/* Number of IPv4 packets forwarded */
-	u64 packets_not_forwarded64;
-					/* Number of IPv4 packets not forwarded */
-	u64 exception_events64[SFE_IPV4_EXCEPTION_EVENT_LAST];
-
-	/*
-	 * Control state.
-	 */
-	struct kobject *sys_sfe_ipv4;	/* sysfs linkage */
-	int debug_dev;			/* Major number of the debug char device */
-	u32 debug_read_seq;	/* sequence number for debug dump */
-};
-
-/*
- * Enumeration of the XML output.
- */
-enum sfe_ipv4_debug_xml_states {
-	SFE_IPV4_DEBUG_XML_STATE_START,
-	SFE_IPV4_DEBUG_XML_STATE_CONNECTIONS_START,
-	SFE_IPV4_DEBUG_XML_STATE_CONNECTIONS_CONNECTION,
-	SFE_IPV4_DEBUG_XML_STATE_CONNECTIONS_END,
-	SFE_IPV4_DEBUG_XML_STATE_EXCEPTIONS_START,
-	SFE_IPV4_DEBUG_XML_STATE_EXCEPTIONS_EXCEPTION,
-	SFE_IPV4_DEBUG_XML_STATE_EXCEPTIONS_END,
-	SFE_IPV4_DEBUG_XML_STATE_STATS,
-	SFE_IPV4_DEBUG_XML_STATE_END,
-	SFE_IPV4_DEBUG_XML_STATE_DONE
-};
-
-/*
- * XML write state.
- */
-struct sfe_ipv4_debug_xml_write_state {
-	enum sfe_ipv4_debug_xml_states state;
-					/* XML output file state machine state */
-	int iter_exception;		/* Next exception iterator */
-};
 
 typedef bool (*sfe_ipv4_debug_xml_write_method_t)(struct sfe_ipv4 *si, char *buffer, char *msg, size_t *length,
 						  int *total_read, struct sfe_ipv4_debug_xml_write_state *ws);
@@ -515,7 +132,7 @@ static inline u16 sfe_ipv4_gen_ip_csum(struct sfe_ipv4_ip_hdr *iph)
  * sfe_ipv4_get_connection_match_hash()
  *	Generate the hash used in connection match lookups.
  */
-static inline unsigned int sfe_ipv4_get_connection_match_hash(struct net_device *dev, u8 protocol,
+static inline unsigned int sfe_ipv4_get_connection_match_hash(struct net_device *dev, unsigned int protocol,
 							      __be32 src_ip, __be16 src_port,
 							      __be32 dest_ip, __be16 dest_port)
 {
@@ -530,16 +147,21 @@ static inline unsigned int sfe_ipv4_get_connection_match_hash(struct net_device 
  *
  * On entry we must be holding the lock that protects the hash table.
  */
-static struct sfe_ipv4_connection_match *
-sfe_ipv4_find_sfe_ipv4_connection_match(struct sfe_ipv4 *si, struct net_device *dev, u8 protocol,
-					__be32 src_ip, __be16 src_port,
-					__be32 dest_ip, __be16 dest_port)
+struct sfe_ipv4_connection_match *sfe_ipv4_find_sfe_ipv4_connection_match(struct sfe_ipv4 *si_income,
+	struct net_device *dev, unsigned int protocol, __be32 src_ip, __be16 src_port,
+	__be32 dest_ip, __be16 dest_port)
 {
 	struct sfe_ipv4_connection_match *cm;
 	struct sfe_ipv4_connection_match *head;
 	unsigned int conn_match_idx;
+	struct sfe_ipv4 *si = NULL;
 
 	conn_match_idx = sfe_ipv4_get_connection_match_hash(dev, protocol, src_ip, src_port, dest_ip, dest_port);
+	if (si) {
+		si = si_income;
+	} else {
+		si = &__si;
+	}
 	cm = si->conn_match_hash[conn_match_idx];
 
 	/*
@@ -809,7 +431,7 @@ static inline void sfe_ipv4_remove_sfe_ipv4_connection_match(struct sfe_ipv4 *si
  * sfe_ipv4_get_connection_hash()
  *	Generate the hash used in connection lookups.
  */
-static inline unsigned int sfe_ipv4_get_connection_hash(u8 protocol, __be32 src_ip, __be16 src_port,
+static inline unsigned int sfe_ipv4_get_connection_hash(unsigned int protocol, __be32 src_ip, __be16 src_port,
 							__be32 dest_ip, __be16 dest_port)
 {
 	u32 hash = ntohl(src_ip ^ dest_ip) ^ protocol ^ ntohs(src_port ^ dest_port);
@@ -1086,6 +708,14 @@ static void sfe_ipv4_flush_sfe_ipv4_connection(struct sfe_ipv4 *si,
 
 	rcu_read_unlock();
 
+#if ENABLE_PPPOE_RULE
+	if (c->original_match->pppoe_sk) {
+		sock_put(c->original_match->pppoe_sk);
+	}
+	if (c->reply_match->pppoe_sk) {
+		sock_put(c->reply_match->pppoe_sk);
+	}
+#endif
 	/*
 	 * Release our hold of the source and dest devices and free the memory
 	 * for our connection objects.
@@ -1105,13 +735,18 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 			     unsigned int len, struct sfe_ipv4_ip_hdr *iph, unsigned int ihl, bool flush_on_find)
 {
 	struct sfe_ipv4_udp_hdr *udph;
+#if ENABLE_PPPOE_RULE
+	__be16 proto;
+#endif
+	u16 xmit_src_mac[ETH_ALEN / 2];
+	u16 xmit_dest_mac[ETH_ALEN / 2];
 	__be32 src_ip;
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
 	struct sfe_ipv4_connection_match *cm;
 	u8 ttl;
-	struct net_device *xmit_dev;
+	struct net_device *xmit_dev = NULL;
 
 	/*
 	 * Is our packet too short to contain a valid UDP header?
@@ -1143,7 +778,17 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	/*
 	 * Look for a connection match.
 	 */
-	cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
+	if (!dev) {
+		int i = 0;
+		for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+			if (!default_pppoe_dev[i]) continue;
+
+			cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, default_pppoe_dev[i], IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+			if (cm) break;
+		}
+	} else {
+		cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
+	}
 	if (unlikely(!cm)) {
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_UDP_NO_CONNECTION]++;
 		si->packets_not_forwarded++;
@@ -1160,6 +805,7 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	 */
 	if (unlikely(flush_on_find)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_UDP_IP_OPTIONS_OR_INITIAL_FRAGMENT]++;
 		si->packets_not_forwarded++;
@@ -1188,6 +834,7 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	ttl = iph->ttl;
 	if (unlikely(ttl < 2)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_UDP_SMALL_TTL]++;
 		si->packets_not_forwarded++;
@@ -1204,13 +851,14 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	 */
 	if (unlikely(len > cm->xmit_dev_mtu)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_UDP_NEEDS_FRAGMENTATION]++;
 		si->packets_not_forwarded++;
 		spin_unlock_bh(&si->lock);
 
 		DEBUG_TRACE("larger than mtu\n");
-		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_FLUSH);
+		//sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_FLUSH);
 		return 0;
 	}
 
@@ -1312,28 +960,85 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		si->active_tail = cm;
 	}
 
-	xmit_dev = cm->xmit_dev;
+#if ENABLE_PPPOE_RULE
+	/*
+	 * On creation, we assume that cm->pppoe_sk is set, and that the socket
+	 * is held.  If the connection is no longer established, we neeed to
+	 * release the socket, and we need to un-offload the connection.  We
+	 * must also release the socket if the connection is closed, of course.
+	 * We assume that the xmit dev, as well as the dest MAC are set based on
+	 * the pppoe header (dest is po->pppoe_pa.remote).
+	 */
+	if (cm->pppoe_sk) {
+		struct pppoe_hdr *ph;
+		int data_len = skb->len;
+		struct sock *sk = cm->pppoe_sk;
+		struct pppox_sock *po = pppox_sk(sk);
+		struct net_device *dev = po->pppoe_dev;
+
+		if (sock_flag(sk, SOCK_DEAD) || !(sk->sk_state & PPPOX_CONNECTED))
+			goto abort;
+
+		ph = (struct pppoe_hdr *)__skb_push(skb, PPPOE_SES_HLEN);
+		ph->ver = 1;
+		ph->type = 1;
+		ph->code = 0;
+		ph->sid = po->num;
+		ph->length = htons(data_len + 2);
+		ph->tag[0].tag_type = htons(PPP_IP);
+		memcpy(xmit_dest_mac, po->pppoe_pa.remote, ETH_ALEN);
+		memcpy(xmit_src_mac, dev->dev_addr, ETH_ALEN);
+		xmit_dev = dev;
+
+		proto = ETH_P_PPP_SES;
+	} else {
+		memcpy(xmit_dest_mac, cm->xmit_dest_mac, ETH_ALEN);
+		memcpy(xmit_src_mac, cm->xmit_src_mac, ETH_ALEN);
+
+		proto = ETH_P_IP;
+	}
+#else
+	memcpy(xmit_dest_mac, cm->xmit_dest_mac, ETH_ALEN);
+	memcpy(xmit_src_mac, cm->xmit_src_mac, ETH_ALEN);
+
+	proto = ETH_P_IP;
+#endif
+
+	if (!xmit_dev) xmit_dev = cm->xmit_dev;
 	skb->dev = xmit_dev;
+
+#if ENABLE_PPPOE_RULE
+	skb->protocol = cpu_to_be16(proto);
+#endif
 
 	/*
 	 * Check to see if we need to write a header.
 	 */
-	if (likely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR)) {
+	if (likely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR) || cm->pppoe_sk) {
 		if (unlikely(!(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_FAST_ETH_HDR))) {
+#if ENABLE_PPPOE_RULE
+			dev_hard_header(skb, xmit_dev, proto,
+					xmit_dest_mac, xmit_src_mac, len);
+#else
 			dev_hard_header(skb, xmit_dev, ETH_P_IP,
-					cm->xmit_dest_mac, cm->xmit_src_mac, len);
+					xmit_dest_mac, xmit_src_mac, len);
+#endif
 		} else {
 			/*
 			 * For the simple case we write this really fast.
 			 */
 			struct sfe_ipv4_eth_hdr *eth = (struct sfe_ipv4_eth_hdr *)__skb_push(skb, ETH_HLEN);
+#if ENABLE_PPPOE_RULE
+			eth->h_proto = skb->protocol;
+#else
 			eth->h_proto = htons(ETH_P_IP);
-			eth->h_dest[0] = cm->xmit_dest_mac[0];
-			eth->h_dest[1] = cm->xmit_dest_mac[1];
-			eth->h_dest[2] = cm->xmit_dest_mac[2];
-			eth->h_source[0] = cm->xmit_src_mac[0];
-			eth->h_source[1] = cm->xmit_src_mac[1];
-			eth->h_source[2] = cm->xmit_src_mac[2];
+#endif
+			eth->h_dest[0] = xmit_dest_mac[0];
+			eth->h_dest[1] = xmit_dest_mac[1];
+			eth->h_dest[2] = xmit_dest_mac[2];
+			eth->h_source[0] = xmit_src_mac[0];
+			eth->h_source[1] = xmit_src_mac[1];
+			eth->h_source[2] = xmit_src_mac[2];
 		}
 	}
 
@@ -1372,6 +1077,12 @@ static int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	dev_queue_xmit(skb);
 
 	return 1;
+
+#if ENABLE_PPPOE_RULE
+abort:
+	kfree_skb(skb);
+	return 1;
+#endif
 }
 
 /*
@@ -1466,11 +1177,16 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
+#if ENABLE_PPPOE_RULE
+	__be16 proto;
+#endif
+	u16 xmit_src_mac[ETH_ALEN / 2];
+	u16 xmit_dest_mac[ETH_ALEN / 2];
 	struct sfe_ipv4_connection_match *cm;
 	struct sfe_ipv4_connection_match *counter_cm;
 	u8 ttl;
 	u32 flags;
-	struct net_device *xmit_dev;
+	struct net_device *xmit_dev = NULL;
 
 	/*
 	 * Is our packet too short to contain a valid UDP header?
@@ -1493,6 +1209,8 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	src_ip = iph->saddr;
 	dest_ip = iph->daddr;
 
+	skb->origin_srcip = iph->saddr;
+
 	tcph = (struct sfe_ipv4_tcp_hdr *)(skb->data + ihl);
 	src_port = tcph->source;
 	dest_port = tcph->dest;
@@ -1503,7 +1221,17 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	/*
 	 * Look for a connection match.
 	 */
-	cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+	if (!dev) {
+		int i = 0;
+		for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+			if (!default_pppoe_dev[i]) continue;
+
+			cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, default_pppoe_dev[i], IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+			if (cm) break;
+		}
+	} else {
+		cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+	}
 	if (unlikely(!cm)) {
 		/*
 		 * We didn't get a connection but as TCP is connection-oriented that
@@ -1534,6 +1262,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	 */
 	if (unlikely(flush_on_find)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_IP_OPTIONS_OR_INITIAL_FRAGMENT]++;
 		si->packets_not_forwarded++;
@@ -1561,6 +1290,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	ttl = iph->ttl;
 	if (unlikely(ttl < 2)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_SMALL_TTL]++;
 		si->packets_not_forwarded++;
@@ -1576,14 +1306,15 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	 * we can't forward it easily.
 	 */
 	if (unlikely((len > cm->xmit_dev_mtu) && !skb_is_gso(skb))) {
-		struct sfe_ipv4_connection *c = cm->connection;
-		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
+		//struct sfe_ipv4_connection *c = cm->connection;
+
+		//sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_NEEDS_FRAGMENTATION]++;
 		si->packets_not_forwarded++;
 		spin_unlock_bh(&si->lock);
 
 		DEBUG_TRACE("larger than mtu\n");
-		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_FLUSH);
+		//sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_FLUSH);
 		return 0;
 	}
 
@@ -1593,6 +1324,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	 */
 	if (unlikely((flags & (TCP_FLAG_SYN | TCP_FLAG_RST | TCP_FLAG_FIN | TCP_FLAG_ACK)) != TCP_FLAG_ACK)) {
 		struct sfe_ipv4_connection *c = cm->connection;
+
 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_FLAGS]++;
 		si->packets_not_forwarded++;
@@ -1625,6 +1357,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		seq = ntohl(tcph->seq);
 		if (unlikely((s32)(seq - (cm->protocol_state.tcp.max_end + 1)) > 0)) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_SEQ_EXCEEDS_RIGHT_EDGE]++;
 			si->packets_not_forwarded++;
@@ -1642,6 +1375,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		data_offs = tcph->doff << 2;
 		if (unlikely(data_offs < sizeof(struct sfe_ipv4_tcp_hdr))) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_SMALL_DATA_OFFS]++;
 			si->packets_not_forwarded++;
@@ -1659,6 +1393,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		sack = ack;
 		if (unlikely(!sfe_ipv4_process_tcp_option_sack(tcph, data_offs, &sack))) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_BAD_SACK]++;
 			si->packets_not_forwarded++;
@@ -1675,6 +1410,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		data_offs += sizeof(struct sfe_ipv4_ip_hdr);
 		if (unlikely(len < data_offs)) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_BIG_DATA_OFFS]++;
 			si->packets_not_forwarded++;
@@ -1694,6 +1430,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		if (unlikely((s32)(end - (cm->protocol_state.tcp.end
 						- counter_cm->protocol_state.tcp.max_win - 1)) < 0)) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_SEQ_BEFORE_LEFT_EDGE]++;
 			si->packets_not_forwarded++;
@@ -1710,6 +1447,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		 */
 		if (unlikely((s32)(sack - (counter_cm->protocol_state.tcp.end + 1)) > 0)) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_ACK_EXCEEDS_RIGHT_EDGE]++;
 			si->packets_not_forwarded++;
@@ -1730,6 +1468,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 			    - 1;
 		if (unlikely((s32)(sack - left_edge) < 0)) {
 			struct sfe_ipv4_connection *c = cm->connection;
+
 			sfe_ipv4_remove_sfe_ipv4_connection(si, c);
 			si->exception_events[SFE_IPV4_EXCEPTION_EVENT_TCP_ACK_BEFORE_LEFT_EDGE]++;
 			si->packets_not_forwarded++;
@@ -1855,28 +1594,77 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 		si->active_tail = cm;
 	}
 
-	xmit_dev = cm->xmit_dev;
+#if ENABLE_PPPOE_RULE
+	if (cm->pppoe_sk) {
+		struct pppoe_hdr *ph;
+		int data_len = skb->len;
+		struct sock *sk = cm->pppoe_sk;
+		struct pppox_sock *po = pppox_sk(sk);
+		struct net_device *dev = po->pppoe_dev;
+
+		if (sock_flag(sk, SOCK_DEAD) || !(sk->sk_state & PPPOX_CONNECTED))
+			goto abort;
+
+		ph = (struct pppoe_hdr *)__skb_push(skb, PPPOE_SES_HLEN);
+		skb_reset_network_header(skb);
+		ph->ver = 1;
+		ph->type = 1;
+		ph->code = 0;
+		ph->sid = po->num;
+		ph->length = htons(data_len + 2);
+		ph->tag[0].tag_type = htons(PPP_IP);
+		memcpy(xmit_dest_mac, po->pppoe_pa.remote, ETH_ALEN);
+		memcpy(xmit_src_mac, dev->dev_addr, ETH_ALEN);
+
+		proto = ETH_P_PPP_SES;
+		xmit_dev = dev;
+	} else {
+		proto = ETH_P_IP;
+
+		memcpy(xmit_dest_mac, cm->xmit_dest_mac, ETH_ALEN);
+		memcpy(xmit_src_mac, cm->xmit_src_mac, ETH_ALEN);
+	}
+#else
+	proto = ETH_P_IP;
+	memcpy(xmit_dest_mac, cm->xmit_dest_mac, ETH_ALEN);
+	memcpy(xmit_src_mac, cm->xmit_src_mac, ETH_ALEN);
+#endif
+
+	if (!xmit_dev) xmit_dev = cm->xmit_dev;
 	skb->dev = xmit_dev;
+
+#if ENABLE_PPPOE_RULE
+	skb->protocol = cpu_to_be16(proto);
+#endif
 
 	/*
 	 * Check to see if we need to write a header.
 	 */
-	if (likely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR)) {
+	if (likely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR) || cm->pppoe_sk) {
 		if (unlikely(!(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_FAST_ETH_HDR))) {
+#if ENABLE_PPPOE_RULE
+			dev_hard_header(skb, xmit_dev, proto,
+					xmit_dest_mac, xmit_src_mac, len);
+#else
 			dev_hard_header(skb, xmit_dev, ETH_P_IP,
-					cm->xmit_dest_mac, cm->xmit_src_mac, len);
+					xmit_dest_mac, xmit_src_mac, len);
+#endif
 		} else {
 			/*
 			 * For the simple case we write this really fast.
 			 */
 			struct sfe_ipv4_eth_hdr *eth = (struct sfe_ipv4_eth_hdr *)__skb_push(skb, ETH_HLEN);
+#if ENABLE_PPPOE_RULE
+			eth->h_proto = skb->protocol;
+#else
 			eth->h_proto = htons(ETH_P_IP);
-			eth->h_dest[0] = cm->xmit_dest_mac[0];
-			eth->h_dest[1] = cm->xmit_dest_mac[1];
-			eth->h_dest[2] = cm->xmit_dest_mac[2];
-			eth->h_source[0] = cm->xmit_src_mac[0];
-			eth->h_source[1] = cm->xmit_src_mac[1];
-			eth->h_source[2] = cm->xmit_src_mac[2];
+#endif
+			eth->h_dest[0] = xmit_dest_mac[0];
+			eth->h_dest[1] = xmit_dest_mac[1];
+			eth->h_dest[2] = xmit_dest_mac[2];
+			eth->h_source[0] = xmit_src_mac[0];
+			eth->h_source[1] = xmit_src_mac[1];
+			eth->h_source[2] = xmit_src_mac[2];
 		}
 	}
 
@@ -1915,6 +1703,12 @@ static int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct ne
 	dev_queue_xmit(skb);
 
 	return 1;
+
+#if ENABLE_PPPOE_RULE
+abort:
+	kfree_skb(skb);
+	return 1;
+#endif
 }
 
 /*
@@ -2090,7 +1884,17 @@ static int sfe_ipv4_recv_icmp(struct sfe_ipv4 *si, struct sk_buff *skb, struct n
 	 * been sent on the interface from which we received it though so that's still
 	 * ok to use.
 	 */
-	cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, icmp_iph->protocol, dest_ip, dest_port, src_ip, src_port);
+	if (!dev) {
+		int i = 0;
+		for (i = 0; i < MAX_PPPOE_INTERFACE; i++) {
+			if (!default_pppoe_dev[i]) continue;
+
+			cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, default_pppoe_dev[i], IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+			if (cm) break;
+		}
+	} else {
+		cm = sfe_ipv4_find_sfe_ipv4_connection_match(si, dev, icmp_iph->protocol, dest_ip, dest_port, src_ip, src_port);
+	}
 	if (unlikely(!cm)) {
 		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_ICMP_NO_CONNECTION]++;
 		si->packets_not_forwarded++;
@@ -2113,6 +1917,57 @@ static int sfe_ipv4_recv_icmp(struct sfe_ipv4 *si, struct sk_buff *skb, struct n
 	sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_FLUSH);
 	return 0;
 }
+
+#if ENABLE_PPPOE_RULE
+int sfe_pppoe_recv(struct net_device *dev, struct sk_buff *skb)
+{
+	int offloaded;
+	int ppplen, skblen, proto;
+	struct pppoe_hdr *phdr;
+
+	if (!pskb_may_pull(skb, PPPOE_SES_HLEN)) {
+		DEBUG_TRACE( "sfe pppoe: failed at pskb_may_pull\n");
+		return 0;
+	}
+
+	phdr = pppoe_hdr(skb);
+	ppplen = ntohs(phdr->length) - sizeof(struct pppoe_tag);
+	skblen = skb->len - PPPOE_SES_HLEN;
+	proto = skb->protocol;
+
+	/* check pppoe len < len */
+	if (skblen < ppplen) {
+		DEBUG_TRACE( "sfe pppoe: skblen (%d) < ppplen (%d)\n",
+				skblen, ppplen);
+		return 0;
+	}
+
+	/* We already calculated the skblen diff; inline skb_pull */
+	skb->len = skblen;
+	BUG_ON(skb->len < skb->data_len);
+	skb->data += PPPOE_SES_HLEN;
+	switch(ntohs(phdr->tag[0].tag_type)) {
+		case PPP_IP:
+			skb->protocol = ETH_P_IP;
+			skb->ignore_pppoe_accelerate = 1;
+			offloaded = sfe_ipv4_recv(NULL, skb);
+			break;
+		default:
+			DEBUG_TRACE("sfe pppoe: unknown protocol %x",
+					ntohs(phdr->tag[0].tag_type));
+			offloaded = 0;
+			break;
+	}
+
+	if (!offloaded) {
+		/* Put the packet back the way we found it - not offloaded */
+		skb->ignore_pppoe_accelerate = 0;
+		skb_push(skb, PPPOE_SES_HLEN);
+		skb->protocol = proto;
+	}
+	return offloaded;
+}
+#endif
 
 /*
  * sfe_ipv4_recv()
@@ -2387,6 +2242,10 @@ int sfe_ipv4_create_rule(struct sfe_connection_create *sic)
 		return -EADDRINUSE;
 	}
 
+	if (!strncmp(dest_dev->name, "pppoe", 5)) {
+		update_pppoe_interface(dest_dev);
+	}
+
 	/*
 	 * Allocate the various connection tracking objects.
 	 */
@@ -2431,6 +2290,10 @@ int sfe_ipv4_create_rule(struct sfe_connection_create *sic)
 	original_cm->rx_packet_count64 = 0;
 	original_cm->rx_byte_count = 0;
 	original_cm->rx_byte_count64 = 0;
+
+#if ENABLE_PPPOE_RULE
+	original_cm->pppoe_sk = NULL;
+#endif
 	original_cm->xmit_dev = dest_dev;
 	original_cm->xmit_dev_mtu = sic->dest_mtu;
 	memcpy(original_cm->xmit_src_mac, dest_dev->dev_addr, ETH_ALEN);
@@ -2487,6 +2350,11 @@ int sfe_ipv4_create_rule(struct sfe_connection_create *sic)
 	reply_cm->rx_packet_count64 = 0;
 	reply_cm->rx_byte_count = 0;
 	reply_cm->rx_byte_count64 = 0;
+
+#if ENABLE_PPPOE_RULE
+	reply_cm->pppoe_sk = NULL;
+#endif
+
 	reply_cm->xmit_dev = src_dev;
 	reply_cm->xmit_dev_mtu = sic->src_mtu;
 	memcpy(reply_cm->xmit_src_mac, src_dev->dev_addr, ETH_ALEN);
@@ -2690,6 +2558,8 @@ void sfe_ipv4_destroy_all_rules_for_dev(struct net_device *dev)
 {
 	struct sfe_ipv4 *si = &__si;
 	struct sfe_ipv4_connection *c;
+
+	remove_all_pppoe_interface();
 
 another_round:
 	spin_lock_bh(&si->lock);
@@ -3370,12 +3240,17 @@ module_init(sfe_ipv4_init)
 module_exit(sfe_ipv4_exit)
 
 EXPORT_SYMBOL(sfe_ipv4_recv);
+#if ENABLE_PPPOE_RULE
+EXPORT_SYMBOL(sfe_pppoe_recv);
+#endif
 EXPORT_SYMBOL(sfe_ipv4_create_rule);
 EXPORT_SYMBOL(sfe_ipv4_destroy_rule);
 EXPORT_SYMBOL(sfe_ipv4_destroy_all_rules_for_dev);
 EXPORT_SYMBOL(sfe_ipv4_register_sync_rule_callback);
 EXPORT_SYMBOL(sfe_ipv4_mark_rule);
 EXPORT_SYMBOL(sfe_ipv4_update_rule);
+
+EXPORT_SYMBOL(sfe_ipv4_find_sfe_ipv4_connection_match);
 
 MODULE_DESCRIPTION("Shortcut Forwarding Engine - IPv4 edition");
 MODULE_LICENSE("Dual BSD/GPL");

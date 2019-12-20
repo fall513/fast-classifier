@@ -29,6 +29,16 @@ define KernelPackage/$(PKG_NAME)/description
 $(call KernelPackage/$(PKG_NAME)/Default/description)
 endef
 
+define Package/fast-classifier-example
+  TITLE:=Example user space program for fast-classifier
+  DEPENDS:=+libnl +libfast-classifier
+endef
+
+define Package/fast-classifier-example/description
+Example user space program that communicates with fast
+classifier kernel module
+endef
+
 # SFE_MAKE_OPTS:=SFE_SUPPORT_IPV6=y
 
 define Build/Prepare
@@ -47,8 +57,18 @@ define Build/Compile/kmod
 		modules
 endef
 
+define Build/Compile/example
+	$(TARGET_CC) -o $(PKG_BUILD_DIR)/userspace_fast_classifier \
+		-I $(PKG_BUILD_DIR) \
+		-I$(STAGING_DIR)/usr/include/libnl \
+		-I$(STAGING_DIR)/usr/include/libnl3 \
+		-lnl-genl-3 -lnl-3 \
+		$(PKG_BUILD_DIR)/nl_classifier_test.c
+endef
+
 define Build/Compile
 	$(Build/Compile/kmod)
+	$(if $(CONFIG_PACKAGE_fast-classifier-example),$(Build/Compile/example))
 endef
 
 define Build/InstallDev
@@ -56,4 +76,11 @@ define Build/InstallDev
 	$(CP) $(PKG_BUILD_DIR)/fast-classifier.h $(1)/usr/include/
 endef
 
+
+define Package/fast-classifier-example/install
+	$(INSTALL_DIR) $(1)/sbin
+	$(CP) $(PKG_BUILD_DIR)/userspace_fast_classifier $(1)/sbin/
+endef
+
 $(eval $(call KernelPackage,$(PKG_NAME)))
+$(eval $(call BuildPackage,fast-classifier-example))
